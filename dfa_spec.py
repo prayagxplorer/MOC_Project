@@ -1,13 +1,4 @@
-"""Executable DFA for the Review 1 ML-KEM handshake.
-
-The transition table below is deliberately complete: every state/symbol pair
-has an entry.  This lets protocol code use one source of truth for ordering
-and makes every unexpected message move the machine to ``reject``.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
+from itertools import product
 
 ALPHABET = ("PK", "CT", "CONF_A", "CONF_B")
 INIT = "init"
@@ -16,12 +7,10 @@ CIPHERTEXT_RECEIVED = "ciphertext-received"
 CONFIRMED = "confirmed"
 ESTABLISHED = "established"
 REJECT = "reject"
-
 STATES = (INIT, KEY_SENT, CIPHERTEXT_RECEIVED, CONFIRMED, ESTABLISHED, REJECT)
 ACCEPTING_STATES = frozenset({ESTABLISHED})
 
-# The sole source of truth for legal message ordering.
-TRANSITIONS: dict[tuple[str, str], str] = {
+TRANSITIONS = {
     (INIT, "PK"): KEY_SENT,
     (INIT, "CT"): REJECT,
     (INIT, "CONF_A"): REJECT,
@@ -50,47 +39,49 @@ TRANSITIONS: dict[tuple[str, str], str] = {
 
 
 class DFARejection(RuntimeError):
-    """Raised when an input is not legal at the DFA's current state."""
-
-    def __init__(self, previous_state: str, symbol: str) -> None:
+    def __init__(self, previous_state, symbol):
         self.previous_state = previous_state
         self.symbol = symbol
-        super().__init__(
-            f"DFA rejected {symbol!r}: state was {previous_state!r}; "
-            f"new state is {REJECT!r}."
-        )
+        super().__init__(f"DFA rejected {symbol!r} at {previous_state!r}")
 
 
-@dataclass
 class HandshakeDFA:
-    """A mutable recognizer for one handshake transcript."""
-
-    state: str = INIT
-    transitions: dict[tuple[str, str], str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.state not in STATES:
-            raise ValueError(f"Unknown initial state: {self.state!r}")
-        if self.transitions is None:
-            # Kept as an attribute so prototype code can inspect/use the table.
-            self.transitions = TRANSITIONS
+    def __init__(self, state=INIT, transitions=None):
+        if state not in STATES:
+            raise ValueError(f"Unknown initial state: {state!r}")
+        self.state = state
+        self.transitions = TRANSITIONS if transitions is None else transitions
 
     @property
-    def accepted(self) -> bool:
+    def accepted(self):
         return self.state in ACCEPTING_STATES
 
-    def step(self, symbol: str) -> str:
-        """Consume *symbol*, or enter ``reject`` and raise DFARejection.
-
-        Code performing a cryptographic action should call this method first.
-        Therefore an invalid transition cannot trigger that action.
-        """
-        if symbol not in ALPHABET:
-            raise ValueError(f"Unknown DFA symbol: {symbol!r}")
-
+    def step(self, symbol):
         previous_state = self.state
-        # ``transitions`` is always set by __post_init__.
-        self.state = self.transitions[(previous_state, symbol)]  # type: ignore[index]
+        # Symbols outside the alphabet enter the implicit dead state too.
+        self.state = self.transitions.get((self.state, symbol), REJECT)
         if self.state == REJECT:
             raise DFARejection(previous_state, symbol)
         return self.state
+
+
+def accepts(trace):
+    state = INIT
+    for symbol in trace:
+        state = TRANSITIONS.get((state, symbol), REJECT)
+    return state in ACCEPTING_STATES
+
+
+if __name__ == "__main__":
+    checked, accepted = 0, []
+    for length in range(7):
+        for trace in product(ALPHABET, repeat=length):
+            checked += 1
+            if accepts(trace):
+                accepted.append(trace)
+    assert checked == 5461
+    assert accepted == [("PK", "CT", "CONF_A", "CONF_B")]
+    assert len(TRANSITIONS) == len(STATES) * len(ALPHABET) == 24
+    assert all(TRANSITIONS[REJECT, symbol] == REJECT for symbol in ALPHABET)
+    assert not accepts(["INVALID"])
+    print(f"{checked} strings checked; language verified")
